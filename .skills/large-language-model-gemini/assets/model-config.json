@@ -1,0 +1,8 @@
+{
+  "model": "gemini-3.8-flash",
+  "project": "miaoda-us-online",
+  "location": "global",
+  "publisher": "google",
+  "maxOutputTokens": 8192,
+  "requestType": "offpeak"
+}

@@ -1,0 +1,143 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: medo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-medo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-medo_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-medo_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-medo} -d ${POSTGRES_DB:-medo_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: medo_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secret}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: medo_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-medo_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-medo_minio_secret}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+    container_name: medo_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-medo}:${POSTGRES_PASSWORD:-medo_secret}@postgres:5432/${POSTGRES_DB:-medo_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
+      STORAGE_LOCAL_PATH: ${STORAGE_LOCAL_PATH:-/app/storage}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-medo_minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-medo_minio_secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-medo-photos}
+      MINIO_USE_SSL: "false"
+      JWT_SECRET: ${JWT_SECRET:-change_this_jwt_secret_in_production}
+      SESSION_SECRET: ${SESSION_SECRET:-change_this_session_secret}
+      AI_SERVICE_URL: http://ai-service:8000
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      PORT: 4000
+      DEMO_EMAIL: ${DEMO_EMAIL:-demo@medo.dev}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-demo123456}
+    volumes:
+      - backend_storage:/app/storage
+    ports:
+      - "4000:4000"
+
+  frontend:
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile
+    container_name: medo_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      NEXT_PUBLIC_APP_URL: ${APP_URL:-http://localhost:3000}
+    ports:
+      - "3000:3000"
+
+  ai-service:
+    build:
+      context: ./services/ai-service
+      dockerfile: Dockerfile
+    container_name: medo_ai_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-medo}:${POSTGRES_PASSWORD:-medo_secret}@postgres:5432/${POSTGRES_DB:-medo_db}
+      AI_SERVICE_PORT: 8000
+      MODEL_DIR: /app/models
+      ONNX_EXECUTION_PROVIDER: ${ONNX_EXECUTION_PROVIDER:-CPUExecutionProvider}
+    volumes:
+      - ai_models:/app/models
+    ports:
+      - "8000:8000"
+
+  nginx:
+    image: nginx:alpine
+    container_name: medo_nginx
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  backend_storage:
+  ai_models:

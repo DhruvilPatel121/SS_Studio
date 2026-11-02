@@ -1,0 +1,613 @@
+// Medo.dev - Complete Prisma Schema
+// PostgreSQL + pgvector
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector, uuidOssp(map: "uuid-ossp"), pgTrgm(map: "pg_trgm")]
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  PHOTOGRAPHER
+  STAFF
+  GUEST
+}
+
+enum EventStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+  DELETED
+}
+
+enum EventPrivacy {
+  PUBLIC
+  PRIVATE
+  INVITE_ONLY
+}
+
+enum GroupPrivacy {
+  PUBLIC
+  PRIVATE
+  FACE_ONLY
+  FULL_ACCESS
+  ANONYMOUS_FACE_ACCESS
+}
+
+enum PhotoStatus {
+  PENDING
+  UPLOADING
+  UPLOADED
+  PROCESSING
+  PROCESSED
+  FAILED
+  DELETED
+}
+
+enum ProcessingJobStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  FAILED
+  DELAYED
+}
+
+enum ProcessingJobType {
+  PHOTO_THUMBNAIL
+  FACE_DETECTION
+  FACE_EMBEDDING
+  FACE_INDEXING
+  FACE_MATCHING
+  BULK_PHOTO_PROCESSING
+  DELETE_PHOTO
+  ZIP_GENERATION
+  CLEANUP_FACE_DATA
+}
+
+enum StorageProvider {
+  LOCAL
+  MINIO
+}
+
+enum WatermarkType {
+  NONE
+  TEXT
+  LOGO
+}
+
+enum WatermarkPosition {
+  TOP_LEFT
+  TOP_CENTER
+  TOP_RIGHT
+  CENTER
+  BOTTOM_LEFT
+  BOTTOM_CENTER
+  BOTTOM_RIGHT
+}
+
+enum GalleryTheme {
+  CLASSIC
+  MINIMAL
+  LUXURY
+  WEDDING
+  DARK
+  LIGHT
+  EDITORIAL
+  MODERN
+}
+
+enum FaceDataRetention {
+  DAYS_30
+  DAYS_90
+  YEAR_1
+  UNTIL_EVENT_DELETION
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  REGISTER
+  CREATE_EVENT
+  UPDATE_EVENT
+  DELETE_EVENT
+  ARCHIVE_EVENT
+  UPLOAD_PHOTO
+  DELETE_PHOTO
+  MOVE_PHOTO
+  REPROCESS_PHOTO
+  CREATE_GROUP
+  UPDATE_GROUP
+  DELETE_GROUP
+  CREATE_GUEST
+  DELETE_GUEST
+  FACE_SEARCH
+  DOWNLOAD_PHOTO
+  DOWNLOAD_ZIP
+  FAVORITE_PHOTO
+  GENERATE_QR
+  CHANGE_SETTINGS
+  CHANGE_PERMISSIONS
+  CREATE_USER
+  UPDATE_USER
+  DELETE_USER
+  ADMIN_ACTION
+  ASSIGN_FACE
+  REMOVE_FACE
+}
+
+// ─── USERS & AUTH ────────────────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  email          String   @unique
+  passwordHash   String
+  name           String
+  avatarUrl      String?
+  role           Role     @default(PHOTOGRAPHER)
+  isActive       Boolean  @default(true)
+  isEmailVerified Boolean @default(false)
+  lastLoginAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  ownedEvents    Event[]           @relation("EventOwner")
+  teamMemberships TeamMember[]
+  sessions       Session[]
+  notifications  Notification[]
+  auditLogs      AuditLog[]
+  passwordResets PasswordReset[]
+  brandingSettings BrandingSettings?
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId    String   @db.Uuid
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("sessions")
+}
+
+model PasswordReset {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId    String   @db.Uuid
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@map("password_resets")
+}
+
+// ─── EVENTS ──────────────────────────────────────────────────────────────────
+
+model Event {
+  id          String      @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  slug        String
+  name        String
+  description String?
+  coverImageUrl String?
+  eventDate   DateTime?
+  location    String?
+  timezone    String      @default("Asia/Kolkata")
+  status      EventStatus @default(ACTIVE)
+  privacy     EventPrivacy @default(PRIVATE)
+  isIndexable Boolean     @default(false)
+  expiresAt   DateTime?
+  faceDataRetention FaceDataRetention @default(UNTIL_EVENT_DELETION)
+  theme       GalleryTheme @default(MODERN)
+  ownerId     String      @db.Uuid
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  deletedAt   DateTime?
+
+  // Relations
+  owner       User        @relation("EventOwner", fields: [ownerId], references: [id])
+  groups      EventGroup[]
+  photos      Photo[]
+  qrCodes     QrCode[]
+  shareLinks  ShareLink[]
+  guestProfiles GuestProfile[]
+  teamMembers TeamMember[]
+  analytics   EventAnalytics?
+  notifications Notification[]
+  auditLogs   AuditLog[]
+
+  @@unique([slug, ownerId])
+  @@index([ownerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("events")
+}
+
+model EventGroup {
+  id            String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  eventId       String       @db.Uuid
+  name          String
+  slug          String
+  description   String?
+  coverImageUrl String?
+  privacy       GroupPrivacy @default(PUBLIC)
+  passwordHash  String?
+  isFaceMatchEnabled Boolean @default(true)
+  isDownloadEnabled  Boolean @default(true)
+  watermarkType WatermarkType @default(NONE)
+  sortOrder     Int          @default(0)
+  expiresAt     DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  // Relations
+  event   Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  photos  Photo[]
+  qrCodes QrCode[]
+
+  @@unique([slug, eventId])
+  @@index([eventId])
+  @@map("event_groups")
+}
+
+model TeamMember {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  eventId   String   @db.Uuid
+  userId    String   @db.Uuid
+  role      Role     @default(STAFF)
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([eventId])
+  @@index([userId])
+  @@map("team_members")
+}
+
+// ─── PHOTOS ───────────────────────────────────────────────────────────────────
+
+model Photo {
+  id              String      @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  eventId         String      @db.Uuid
+  groupId         String?     @db.Uuid
+  originalName    String
+  storagePath     String
+  thumbnailPath   String?
+  previewPath     String?
+  mimeType        String
+  fileSize        Int
+  width           Int?
+  height          Int?
+  sha256Hash      String
+  status          PhotoStatus @default(PENDING)
+  processingError String?
+  faceCount       Int         @default(0)
+  downloadCount   Int         @default(0)
+  favoriteCount   Int         @default(0)
+  takenAt         DateTime?
+  uploadedById    String?     @db.Uuid
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  deletedAt       DateTime?
+
+  // Relations
+  event     Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  group     EventGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  faces     PhotoFace[]
+  downloads Download[]
+  favorites Favorite[]
+  jobs      ProcessingJob[]
+
+  @@unique([sha256Hash, eventId])
+  @@index([eventId])
+  @@index([groupId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("photos")
+}
+
+model PhotoFace {
+  id              String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  photoId         String   @db.Uuid
+  eventId         String   @db.Uuid
+  // Bounding box (normalized 0-1)
+  bboxX           Float
+  bboxY           Float
+  bboxW           Float
+  bboxH           Float
+  detectionConf   Float
+  qualityScore    Float?
+  isBlurry        Boolean  @default(false)
+  isDark          Boolean  @default(false)
+  embedding       Unsupported("vector(512)")?
+  guestProfileId  String?  @db.Uuid
+  matchConfidence Float?
+  isManuallyAssigned Boolean @default(false)
+  createdAt       DateTime @default(now())
+
+  photo        Photo        @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  guestProfile GuestProfile? @relation(fields: [guestProfileId], references: [id], onDelete: SetNull)
+
+  @@index([photoId])
+  @@index([eventId])
+  @@index([guestProfileId])
+  @@map("photo_faces")
+}
+
+// ─── GUESTS ───────────────────────────────────────────────────────────────────
+
+model GuestProfile {
+  id            String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  eventId       String   @db.Uuid
+  sessionToken  String   @unique @default(dbgenerated("uuid_generate_v4()"))
+  name          String?
+  email         String?
+  phone         String?
+  downloadCount Int      @default(0)
+  searchCount   Int      @default(0)
+  lastActiveAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  event    Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  selfies  GuestSelfie[]
+  faces    PhotoFace[]
+  downloads Download[]
+  favorites Favorite[]
+
+  @@index([eventId])
+  @@index([sessionToken])
+  @@map("guest_profiles")
+}
+
+model GuestSelfie {
+  id             String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  guestProfileId String   @db.Uuid
+  storagePath    String
+  embedding      Unsupported("vector(512)")?
+  qualityScore   Float?
+  isProcessed    Boolean  @default(false)
+  processingError String?
+  createdAt      DateTime @default(now())
+
+  guestProfile GuestProfile @relation(fields: [guestProfileId], references: [id], onDelete: Cascade)
+
+  @@index([guestProfileId])
+  @@map("guest_selfies")
+}
+
+// ─── QR CODES & SHARE ────────────────────────────────────────────────────────
+
+model QrCode {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  eventId   String   @db.Uuid
+  groupId   String?  @db.Uuid
+  token     String   @unique
+  url       String
+  pngPath   String?
+  svgData   String?
+  scanCount Int      @default(0)
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  event Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  group EventGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@index([token])
+  @@map("qr_codes")
+}
+
+model ShareLink {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  eventId    String   @db.Uuid
+  photoId    String?  @db.Uuid
+  token      String   @unique
+  expiresAt  DateTime?
+  accessCount Int     @default(0)
+  createdAt  DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@map("share_links")
+}
+
+// ─── DOWNLOADS & FAVORITES ───────────────────────────────────────────────────
+
+model Download {
+  id             String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  photoId        String   @db.Uuid
+  guestProfileId String?  @db.Uuid
+  userId         String?  @db.Uuid
+  ipAddress      String?
+  downloadType   String   @default("original") // original | compressed | zip
+  createdAt      DateTime @default(now())
+
+  photo        Photo        @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  guestProfile GuestProfile? @relation(fields: [guestProfileId], references: [id], onDelete: SetNull)
+
+  @@index([photoId])
+  @@index([guestProfileId])
+  @@map("downloads")
+}
+
+model Favorite {
+  id             String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  photoId        String   @db.Uuid
+  guestProfileId String?  @db.Uuid
+  userId         String?  @db.Uuid
+  createdAt      DateTime @default(now())
+
+  photo        Photo        @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  guestProfile GuestProfile? @relation(fields: [guestProfileId], references: [id], onDelete: SetNull)
+
+  @@unique([photoId, guestProfileId])
+  @@unique([photoId, userId])
+  @@index([photoId])
+  @@map("favorites")
+}
+
+// ─── PROCESSING JOBS ─────────────────────────────────────────────────────────
+
+model ProcessingJob {
+  id        String              @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  photoId   String?             @db.Uuid
+  eventId   String?             @db.Uuid
+  type      ProcessingJobType
+  status    ProcessingJobStatus @default(PENDING)
+  progress  Int                 @default(0)
+  error     String?
+  metadata  Json?
+  attempts  Int                 @default(0)
+  maxAttempts Int               @default(3)
+  bullJobId String?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  completedAt DateTime?
+
+  photo Photo? @relation(fields: [photoId], references: [id], onDelete: SetNull)
+
+  @@index([photoId])
+  @@index([eventId])
+  @@index([status])
+  @@index([type])
+  @@map("processing_jobs")
+}
+
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId    String   @db.Uuid
+  eventId   String?  @db.Uuid
+  type      String
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+// ─── AUDIT LOGS ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String      @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId     String?     @db.Uuid
+  eventId    String?     @db.Uuid
+  action     AuditAction
+  resourceType String?
+  resourceId String?
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime    @default(now())
+
+  user  User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  event Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([eventId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─── SETTINGS & BRANDING ──────────────────────────────────────────────────────
+
+model SystemSettings {
+  id                   String  @id @default("global")
+  appName              String  @default("Medo.dev")
+  logoUrl              String?
+  faviconUrl           String?
+  defaultTheme         GalleryTheme @default(MODERN)
+  maxUploadSizeMb      Int     @default(50)
+  allowedImageTypes    String  @default("image/jpeg,image/png,image/webp,image/heic")
+  faceMatchThreshold   Float   @default(0.45)
+  faceQualityThreshold Float   @default(0.5)
+  faceMinSize          Int     @default(40)
+  maxFaceSearchResults Int     @default(500)
+  selfieRateLimit      Int     @default(10)
+  sessionDurationDays  Int     @default(7)
+  maintenanceMode      Boolean @default(false)
+  maintenanceMessage   String?
+  storageProvider      StorageProvider @default(MINIO)
+  updatedAt            DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+model BrandingSettings {
+  id              String  @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId          String  @unique @db.Uuid
+  studioName      String?
+  logoUrl         String?
+  faviconUrl      String?
+  primaryColor    String  @default("#6366f1")
+  secondaryColor  String  @default("#f59e0b")
+  backgroundColor String  @default("#ffffff")
+  buttonStyle     String  @default("rounded")
+  footerText      String?
+  contactEmail    String?
+  contactPhone    String?
+  watermarkType   WatermarkType @default(NONE)
+  watermarkText   String?
+  watermarkLogoUrl String?
+  watermarkPosition WatermarkPosition @default(BOTTOM_RIGHT)
+  watermarkOpacity Float  @default(0.5)
+  watermarkSize   Float   @default(0.15)
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("branding_settings")
+}
+
+// ─── ANALYTICS ────────────────────────────────────────────────────────────────
+
+model EventAnalytics {
+  id              String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  eventId         String   @unique @db.Uuid
+  totalPhotos     Int      @default(0)
+  processedPhotos Int      @default(0)
+  totalFaces      Int      @default(0)
+  totalGuests     Int      @default(0)
+  totalSearches   Int      @default(0)
+  successfulSearches Int   @default(0)
+  totalDownloads  Int      @default(0)
+  totalFavorites  Int      @default(0)
+  storageUsedBytes BigInt  @default(0)
+  updatedAt       DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("event_analytics")
+}
